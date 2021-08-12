@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, TypedDict
 
 import aiohttp
 import numpy as np
@@ -15,9 +15,17 @@ from tqdm import tqdm
 
 from foragerpy.utils import make_identifier, parse_gcs_path, resize_image
 
+FORAGER_EMBEDDINGS_DIR = Path("~/.forager/embeddings").expanduser()
+FORAGER_SCORES_DIR = Path("~/.forager/scores").expanduser()
+FORAGER_IMAGE_LISTS_DIR = Path("~/.forager/image_lists").expanduser()
+
 GET_DATASET_ENDPOINT = "api/get_dataset_info"
 CREATE_DATASET_ENDPOINT = "api/create_dataset"
 DELETE_DATASET_ENDPOINT = "api/delete_dataset"
+IMPORT_LABELS_ENDPOINT = "api/add_annotations_multi"
+EXPORT_LABELS_ENDPOINT = "api/get_annotations"
+IMPORT_EMBEDDINGS_ENDPOINT = "api/add_model_output"
+IMPORT_SCORES_ENDPOINT = "api/add_model_output"
 IMAGE_EXTENSIONS = ("jpg", "jpeg", "png")
 
 INDEX_UPLOAD_GCS_PATH = "gs://foragerml/indexes/"  # trailing slash = directory
@@ -26,8 +34,16 @@ THUMBNAIL_UPLOAD_GCS_PATH = "gs://foragerml/thumbnails/"  # trailing slash = dir
 RESIZE_MAX_HEIGHT = 200
 
 
+class Label(TypedDict):
+    path: str
+    tag: str
+    mode: str
+
+
 class Client(object):
-    def __init__(self, uri: Optional[str] = None, use_proxy: bool = False) -> None:
+    def __init__(
+        self, user_email: str, uri: Optional[str] = None, use_proxy: bool = False
+    ) -> None:
         if not use_proxy and (
             "http_proxy" in os.environ or "https_proxy" in os.environ
         ):
@@ -36,6 +52,7 @@ class Client(object):
                 "--use_proxy flag not specified. Will not use proxy."
             )
 
+        self.user_email = user_email
         self.uri = uri if uri else self._default_uri()
         self.use_proxy = use_proxy
 
@@ -50,7 +67,6 @@ class Client(object):
             async with session.get(
                 os.path.join(self.uri, GET_DATASET_ENDPOINT, name)
             ) as response:
-                print(response)
                 assert response.status == 404, f"Dataset {name} already exists"
 
         # Add to database
@@ -59,16 +75,12 @@ class Client(object):
             "train_images_directory": train_images_directory,
             "val_images_directory": val_images_directory,
         }
-        add_db_start = time.time()
-        if True:
-            async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
-                async with session.post(
-                    os.path.join(self.uri, CREATE_DATASET_ENDPOINT), json=params
-                ) as response:
-                    j = await response.json()
-                    assert j["status"] == "success", j
-        add_db_end = time.time()
-        print(f"Time: {add_db_end - add_db_start}")
+        async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
+            async with session.post(
+                os.path.join(self.uri, CREATE_DATASET_ENDPOINT), json=params
+            ) as response:
+                j = await response.json()
+                assert j["status"] == "success", j
 
     async def delete_dataset(self, name: str):
         params = {
@@ -81,14 +93,86 @@ class Client(object):
                 j = await response.json()
                 assert j["status"] == "success", j
 
-    async def import_labels(self, dataset_name: str):
-        pass
+    async def import_labels(
+        self,
+        dataset_name: str,
+        labels: List[Label],
+    ):
+        params = {
+            "dataset": dataset_name,
+            "user": self.user_email,
+            "annotations": [
+                {"category": label["tag"], "mode": label["mode"], "path": label["path"]}
+                for label in labels
+            ],
+        }
+        async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
+            async with session.post(
+                os.path.join(self.uri, IMPORT_LABELS_ENDPOINT, dataset_name),
+                json=params,
+            ) as response:
+                j = await response.json()
+                assert j["created"] == len(labels), j
 
-    async def export_labels(self, dataset_name: str):
-        pass
+    async def export_labels(
+        self, dataset_name: str, tags: List[str] = [], modes: List[str] = []
+    ) -> List[Label]:
+        params = {"by_path": True, "tags": tags, "modes": modes}
+        async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
+            async with session.get(
+                os.path.join(self.uri, EXPORT_LABELS_ENDPOINT, dataset_name),
+                json=params,
+            ) as response:
+                j = await response.json()
+        return j
 
-    async def import_embeddings(self, dataset_name: str):
-        pass
+    async def import_embeddings(
+        self,
+        dataset_name: str,
+        name: str,
+        paths: List[str],
+        embeddings: np.ndarray,
+    ):
+        FORAGER_EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        model_uuid = str(uuid.uuid4())
+        embeddings_path = FORAGER_EMBEDDINGS_DIR / model_uuid
 
-    async def import_scores(self, dataset_name: str):
-        pass
+        embeddings_mm = np.memmap(
+            embeddings_path,
+            dtype="float32",
+            mode="w+",
+            shape=embeddings.shape,
+        )
+        embeddings_mm[:] = embeddings[:]
+        embeddings_mm.flush()
+
+        params = {"name": name, "paths": paths, "embedings_path": embeddings_path}
+        async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
+            async with session.post(
+                os.path.join(self.uri, IMPORT_EMBEDDINGS_ENDPOINT, dataset_name),
+                json=params,
+            ) as response:
+                j = await response.json()
+                assert j["status"] == "success", j
+
+    async def import_scores(
+        self,
+        dataset_name: str,
+        name: str,
+        paths: List[str],
+        scores: np.ndarray,
+    ):
+        FORAGER_SCORES_DIR.mkdir(parents=True, exist_ok=True)
+
+        model_uuid = str(uuid.uuid4())
+        scores_path = FORAGER_SCORES_DIR / model_uuid
+        np.save(scores_path, scores)
+
+        params = {"name": name, "paths": paths, "scores_path": scores_path}
+        async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
+            async with session.post(
+                os.path.join(self.uri, IMPORT_SCORES_ENDPOINT, dataset_name),
+                json=params,
+            ) as response:
+                j = await response.json()
+                assert j["status"] == "success", j
