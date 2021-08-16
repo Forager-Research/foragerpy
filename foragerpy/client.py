@@ -34,9 +34,9 @@ THUMBNAIL_UPLOAD_GCS_PATH = "gs://foragerml/thumbnails/"  # trailing slash = dir
 RESIZE_MAX_HEIGHT = 200
 
 
-class Label(TypedDict):
+class Annotation(TypedDict):
     path: str
-    tag: str
+    category: str
     mode: str
 
 
@@ -93,34 +93,47 @@ class Client(object):
                 j = await response.json()
                 assert j["status"] == "success", j
 
-    async def import_labels(
+    async def import_annotations(
         self,
         dataset_name: str,
-        labels: List[Label],
+        annotations: List[Annotation],
     ):
         params = {
             "dataset": dataset_name,
             "user": self.user_email,
             "annotations": [
-                {"category": label["tag"], "mode": label["mode"], "path": label["path"]}
-                for label in labels
+                {
+                    "category": label["category"],
+                    "mode": label["mode"],
+                    "path": label["path"],
+                }
+                for label in annotations
             ],
         }
         async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
             async with session.post(
-                os.path.join(self.uri, IMPORT_LABELS_ENDPOINT, dataset_name),
+                os.path.join(self.uri, IMPORT_LABELS_ENDPOINT),
                 json=params,
             ) as response:
                 j = await response.json()
-                assert j["created"] == len(labels), j
+                assert j["created"] == len(annotations), j
 
-    async def export_labels(
-        self, dataset_name: str, tags: List[str] = [], modes: List[str] = []
-    ) -> List[Label]:
-        params = {"by_path": True, "tags": tags, "modes": modes}
+    async def export_annotations(
+        self, dataset_name: str, categories: List[str] = [], modes: List[str] = []
+    ) -> List[Annotation]:
+        params = {
+            "dataset_name": dataset_name,
+            "by_path": True,
+        }
+        if categories:
+            params["tags"] = categories
+
+        if modes:
+            params["modes"] = modes
+
         async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
-            async with session.get(
-                os.path.join(self.uri, EXPORT_LABELS_ENDPOINT, dataset_name),
+            async with session.post(
+                os.path.join(self.uri, EXPORT_LABELS_ENDPOINT),
                 json=params,
             ) as response:
                 j = await response.json()
