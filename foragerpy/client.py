@@ -159,7 +159,7 @@ class Client(object):
         embeddings_mm[:] = embeddings[:]
         embeddings_mm.flush()
 
-        params = {"name": name, "paths": paths, "embedings_path": embeddings_path}
+        params = {"name": name, "paths": paths, "embeddings_path": str(embeddings_path)}
         async with aiohttp.ClientSession(trust_env=self.use_proxy) as session:
             async with session.post(
                 os.path.join(self.uri, IMPORT_EMBEDDINGS_ENDPOINT, dataset_name),
